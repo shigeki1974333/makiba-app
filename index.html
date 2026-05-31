@@ -241,7 +241,6 @@ tr:hover td{background:#f4fbf4}
 
 </div><!-- /wrap -->
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script>
 // ===================== 設定 =====================
 const LS_URL     = 'nk_gas_url';
@@ -476,13 +475,45 @@ function showTab(t){
 // ① 日付・時刻を見やすい形式に変換
 function fmtDate(d){
   if(!d)return'—';
-  const parts=d.split('-');
-  if(parts.length!==3)return d;
-  return`${parts[0]}年${parseInt(parts[1])}月${parseInt(parts[2])}日`;
+  // Dateオブジェクトで来た場合も対応
+  if(d instanceof Date){
+    return`${d.getFullYear()}年${d.getMonth()+1}月${d.getDate()}日`;
+  }
+  const s=String(d);
+  // YYYY-MM-DD形式
+  const parts=s.split('-');
+  if(parts.length===3&&parts[0].length===4){
+    return`${parts[0]}年${parseInt(parts[1])}月${parseInt(parts[2])}日`;
+  }
+  return s;
 }
 function fmtTime(t){
-  if(!t)return'—';
-  return t.slice(0,5);
+  if(!t&&t!==0)return'—';
+  const s=String(t).trim();
+  if(!s||s==='—')return'—';
+  // HH:MM または H:MM 形式ならそのまま返す
+  const m1=s.match(/^(\d{1,2}):(\d{2})/);
+  if(m1){
+    // 1899が含まれていたら時刻部分だけ抜き出す
+    if(s.includes('1899')||s.includes('1900')){
+      return`${m1[1].padStart(2,'0')}:${m1[2]}`;
+    }
+    return`${m1[1].padStart(2,'0')}:${m1[2]}`;
+  }
+  // 「1899/12/30 10:05:00」や「1899-12-30T10:05:00」形式
+  const m2=s.match(/(\d{1,2}):(\d{2})(?::\d{2})?/);
+  if(m2){
+    return`${m2[1].padStart(2,'0')}:${m2[2]}`;
+  }
+  // 小数（Googleスプレッドシートの内部形式）
+  const num=parseFloat(s);
+  if(!isNaN(num)&&num>=0&&num<1){
+    const totalMin=Math.round(num*24*60);
+    const h=Math.floor(totalMin/60);
+    const m=totalMin%60;
+    return`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+  }
+  return'—';
 }
 
 // ===================== 一覧 =====================
@@ -602,102 +633,64 @@ function getPdfTitle(){
 function genPDF(){
   const filtered=getFilteredForPdf();
   if(!filtered.length){alert('対象期間の記録がありません。');return;}
-  if(typeof window.jspdf==='undefined'&&typeof jsPDF==='undefined'){alert('PDFライブラリ読込中です。少し待って再試行してください。');return;}
-  const{jsPDF}=window.jspdf||{jsPDF:window.jsPDF};
-  const doc=new jsPDF({orientation:'portrait',unit:'mm',format:'a4'});
-
-  // ③ 日本語を含むテキストを安全に描画する関数
-  function safeText(doc, text, x, y, opts){
-    // jsPDFのhelveticaで日本語は文字化けするため、描画前にASCII以外を「・」に置換せず
-    // そのまま渡す（jsPDF 2.5以降はUTF-8対応）
-    try{ doc.text(String(text||''), x, y, opts); }catch(e){ doc.text('', x, y, opts); }
-  }
-
-  const PW=210,ML=7,MR=7,MT=16,CW=PW-ML-MR;
-  // ④ 45行に変更。行高を調整してA4に収める
-  const ROWS_PER_PAGE=45,HDR_H=8;
-  // A4の印刷エリア = 297 - MT(16) - MB(8) = 273mm
-  // HDR_H(8) + 45行 = 273mm → 1行 = (273-8)/45 ≒ 5.89mm → 5.8mmに設定
-  const ROW_H=5.8;
-
-  const COLS=[
-    {label:'年月日',w:22,key:'date'},
-    {label:'時刻',w:11,key:'time'},
-    {label:'所属会社名',w:33,key:'org'},
-    {label:'役職・資格',w:20,key:'role'},
-    {label:'氏名',w:18,key:'name'},
-    {label:'立入の理由・目的',w:36,key:'purpose'},
-    {label:'立入区域',w:18,key:'area'},
-    {label:'直前農場立入',w:21,key:'prev'},
-    {label:'連絡先',w:17,key:'contact'},
-  ];
 
   const titleStr=getPdfTitle();
   const rows=[];
   filtered.forEach(r=>{
-    // ① 日付・時刻をフォーマットしてPDFに渡す
-    const displayDate=fmtDate(r.date);
-    const displayTime=fmtTime(r.time);
-    rows.push({...r, date:displayDate, time:displayTime, _type:'main'});
+    rows.push({...r,date:fmtDate(r.date),time:fmtTime(r.time),_type:'main'});
     (r.companions||[]).forEach(c=>rows.push({
-      _type:'companion',
-      date:'',time:'',
+      _type:'companion',date:'',time:'',
       org:c.org||'',role:c.role||'',name:c.name||'',
       purpose:'〔同伴〕',area:'',prev:'',contact:'',
     }));
   });
 
-  const totalPages=Math.ceil(rows.length/ROWS_PER_PAGE)||1;
-  for(let pg=0;pg<totalPages;pg++){
-    if(pg>0)doc.addPage();
-    doc.setFillColor(240,247,240);doc.rect(0,0,PW,297,'F');
-    doc.setFillColor(195,228,195);doc.rect(ML,4,CW,10,'F');
+  const COLS=[
+    {label:'年月日',w:'11%',key:'date'},
+    {label:'時刻',w:'6%',key:'time'},
+    {label:'所属会社名',w:'16%',key:'org'},
+    {label:'役職・資格',w:'11%',key:'role'},
+    {label:'氏名',w:'9%',key:'name'},
+    {label:'立入の理由・目的',w:'19%',key:'purpose'},
+    {label:'立入区域',w:'10%',key:'area'},
+    {label:'直前農場立入',w:'11%',key:'prev'},
+    {label:'連絡先',w:'7%',key:'contact'},
+  ];
 
-    // ヘッダータイトル（日本語はそのまま渡す）
-    doc.setFont('helvetica','bold');doc.setFontSize(9);doc.setTextColor(20,60,20);
-    safeText(doc,'飼養衛生管理区域 立入記録簿',ML+2,10.5);
-    doc.setFontSize(7.5);doc.setFont('helvetica','normal');
-    safeText(doc,`対象期間：${titleStr}　出力日：${today()}　${pg+1}/${totalPages}ページ`,PW-MR,10.5,{align:'right'});
+  const rowsHtml=rows.map((r,i)=>{
+    const bg=r._type==='companion'?'background:#e8f6e8':( i%2===0?'':'background:#f4fbf4');
+    return`<tr style="${bg}">${COLS.map(c=>`<td>${esc(String(r[c.key]||''))}</td>`).join('')}</tr>`;
+  }).join('');
 
-    const y0=MT;
-    doc.setFillColor(165,208,165);doc.rect(ML,y0,CW,HDR_H,'F');
-    doc.setFont('helvetica','bold');doc.setFontSize(6.5);doc.setTextColor(15,50,15);
-    let x=ML;
-    COLS.forEach(col=>{
-      safeText(doc,col.label,x+col.w/2,y0+5,{align:'center',maxWidth:col.w-1});
-      x+=col.w;
-    });
+  const html=`<!DOCTYPE html>
+<html lang="ja"><head><meta charset="UTF-8">
+<title>立入記録簿</title>
+<style>
+@page{size:A4 portrait;margin:8mm 6mm}
+body{font-family:'メイリオ','Meiryo','ヒラギノ角ゴ Pro','MS Gothic',sans-serif;font-size:7.5pt;margin:0}
+h2{font-size:10pt;margin:0 0 2mm;color:#1a3a1a}
+.sub{font-size:7pt;color:#444;margin-bottom:3mm}
+table{width:100%;border-collapse:collapse;table-layout:fixed}
+th{background:#a5d0a5;color:#0f320f;padding:2pt 2pt;font-size:7pt;border:0.3pt solid #6a9a6a;text-align:center;word-break:break-all}
+td{padding:1.5pt 2pt;border:0.3pt solid #aaddaa;font-size:7pt;word-break:break-all;vertical-align:top}
+.print-btn{margin-bottom:4mm;padding:6px 16px;background:#2a7a2a;color:#fff;border:none;border-radius:6px;font-size:12px;cursor:pointer;font-family:sans-serif}
+@media print{.print-btn{display:none}}
+</style>
+</head><body>
+<button class="print-btn" onclick="window.print()">🖨️ 印刷 / PDF保存</button>
+<h2>飼養衛生管理区域 立入記録簿</h2>
+<div class="sub">対象期間：${titleStr}　　出力日：${today()}</div>
+<table>
+<colgroup>${COLS.map(c=>`<col style="width:${c.w}">`).join('')}</colgroup>
+<thead><tr>${COLS.map(c=>`<th>${c.label}</th>`).join('')}</tr></thead>
+<tbody>${rowsHtml}</tbody>
+</table>
+</body></html>`;
 
-    doc.setFont('helvetica','normal');doc.setFontSize(6);
-    const pageRows=rows.slice(pg*ROWS_PER_PAGE,(pg+1)*ROWS_PER_PAGE);
-
-    for(let i=0;i<ROWS_PER_PAGE;i++){
-      const ry=y0+HDR_H+i*ROW_H;
-      const isC=i<pageRows.length&&pageRows[i]._type==='companion';
-      doc.setFillColor(isC?232:(i%2===0?248:255),isC?246:(i%2===0?253:255),isC?232:(i%2===0?248:255));
-      doc.rect(ML,ry,CW,ROW_H,'F');
-
-      if(i<pageRows.length){
-        const r=pageRows[i];let cx=ML;
-        doc.setTextColor(isC?60:20,isC?100:40,isC?60:20);
-        doc.setFont('helvetica',isC?'italic':'normal');
-        COLS.forEach(col=>{
-          safeText(doc,String(r[col.key]||''),cx+1,ry+ROW_H*0.65,{maxWidth:col.w-2});
-          cx+=col.w;
-        });
-        doc.setFont('helvetica','normal');
-      }
-
-      doc.setDrawColor(175,218,175);doc.setLineWidth(0.1);
-      let lx=ML;
-      COLS.forEach(col=>{doc.line(lx,ry,lx,ry+ROW_H);lx+=col.w;});
-      doc.line(lx,ry,lx,ry+ROW_H);
-      doc.line(ML,ry+ROW_H,ML+CW,ry+ROW_H);
-    }
-    doc.setDrawColor(130,185,130);doc.setLineWidth(0.3);
-    doc.rect(ML,y0,CW,HDR_H+ROWS_PER_PAGE*ROW_H,'S');
-  }
-  doc.save(`立入記録_${titleStr.replace(/[\s\/～〜年月]/g,'_')}.pdf`);
+  const win=window.open('','_blank');
+  if(!win){alert('ポップアップがブロックされています。ブラウザのポップアップ許可設定を確認してください。');return;}
+  win.document.write(html);
+  win.document.close();
 }
 
 // ===================== パスワード認証 =====================
